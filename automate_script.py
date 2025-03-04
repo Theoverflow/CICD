@@ -5,7 +5,7 @@ import random
 import subprocess
 import yaml
 
-# List of available environments
+# List of environment groups in priority order.
 environments = ["dev", "staging", "production"]
 
 def get_container_ids():
@@ -45,20 +45,17 @@ def extract_container_info(container_data):
     return container_name, container_ip, ssh_port
 
 def generate_inventory():
-    # Ensure directories exist
+    # Ensure directories exist.
     os.makedirs("host_vars", exist_ok=True)
     os.makedirs("group_vars", exist_ok=True)
-
-    # Prepare a dictionary for environment groups (to be placed under "all: children:")
-    groups = {env: {"hosts": []} for env in environments}
-
-    # Discover containers
+    
+    # Discover containers and build a list of container info dictionaries.
     container_ids = get_container_ids()
     if not container_ids:
         print("No running containers found.")
         return
-
-    # Process each container
+    
+    containers_info = []
     for cid in container_ids:
         data = inspect_container(cid)
         if not data:
@@ -66,26 +63,47 @@ def generate_inventory():
         name, ip, port = extract_container_info(data)
         if not name:
             name = cid[:12]
-        # Randomly assign an environment to this container
-        assigned_env = random.choice(environments)
-        # Use container's IP if available; otherwise fallback to localhost
         ansible_host = ip if ip else "localhost"
         host_vars = {
             "ansible_host": ansible_host,
             "ansible_port": int(port) if port else 22,
             "container_id": cid,
-            "container_name": name,
-            "env_assigned": assigned_env  # Assigned environment
+            "container_name": name
         }
-        # Write host-specific variable file in host_vars/
+        # Write host-specific variable file.
         host_file = os.path.join("host_vars", f"{name}.yml")
         with open(host_file, "w") as f:
             yaml.dump(host_vars, f, default_flow_style=False)
         print(f"Created host_vars file: {host_file}")
-
-        # Add host to its assigned environment group
-        groups[assigned_env]["hosts"].append(name)
-
+        
+        containers_info.append({
+            "name": name,
+            "host_vars": host_vars
+        })
+    
+    # Build group assignment ensuring at least one host per group.
+    assigned = {env: set() for env in environments}
+    total = len(containers_info)
+    
+    if total >= 3:
+        # First three containers assigned one per group in order.
+        for idx, env in enumerate(environments):
+            assigned[env].add(containers_info[idx]["name"])
+        # Remaining containers: assign randomly.
+        for container in containers_info[3:]:
+            env_choice = random.choice(environments)
+            assigned[env_choice].add(container["name"])
+    elif total == 2:
+        # Assign first container to dev, second to staging.
+        assigned["dev"].add(containers_info[0]["name"])
+        assigned["staging"].add(containers_info[1]["name"])
+        # For production, use the highest priority container (dev).
+        assigned["production"].add(containers_info[0]["name"])
+    elif total == 1:
+        # Only one container: add it to all groups.
+        for env in environments:
+            assigned[env].add(containers_info[0]["name"])
+    
     # Define creative group variables for each environment.
     group_vars_definitions = {
         "dev": {
@@ -125,24 +143,31 @@ def generate_inventory():
             "custom_message": "Production: Stability is key."
         }
     }
-
+    
     # Write group_vars files for each environment.
     for env, vars_dict in group_vars_definitions.items():
         group_file = os.path.join("group_vars", f"{env}.yml")
         with open(group_file, "w") as f:
             yaml.dump(vars_dict, f, default_flow_style=False)
         print(f"Created group_vars file: {group_file}")
-
+    
     # Build a static inventory in YAML format.
-    # Static inventory format requires a top-level "all:" key.
+    # Format: "all:" with "children:"; each environment group defines "hosts" as a dictionary.
+    groups = {}
+    for env in environments:
+        # Convert the set to a dictionary with empty values.
+        host_dict = {host: {} for host in assigned[env]}
+        groups[env] = {"hosts": host_dict}
+    
     static_inventory = {
         "all": {
             "children": groups
         }
     }
+    
     with open("inventory.yml", "w") as f:
         yaml.dump(static_inventory, f, default_flow_style=False)
-    print("Generated static inventory.yml")
+    print("Generated inventory.yml")
 
 if __name__ == "__main__":
     generate_inventory()
