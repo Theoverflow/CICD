@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 import os
 import json
+import random
 import subprocess
 import yaml
+
+# List of available environments
+environments = ["dev", "staging", "production"]
 
 def get_container_ids():
     """Run 'podman ps -q' to get a list of running container IDs."""
@@ -19,28 +23,22 @@ def inspect_container(container_id):
         print(f"Error inspecting container {container_id}")
         return None
     data = json.loads(result.stdout)
-    if data:
-        return data[0]  # podman inspect returns a list
-    return None
+    return data[0] if data else None
 
 def extract_container_info(container_data):
     """
     Extract container name, container IP, and host SSH port.
-    Assumes that port mappings appear in the 'NetworkSettings.Ports' dict,
-    similar to Docker's output.
+    Assumes port mappings appear in 'NetworkSettings.Ports' similar to Docker's output.
     """
-    # Container name: remove leading '/' if present.
+    # Use container's name (strip leading '/')
     container_name = container_data.get("Name", "").lstrip("/")
-    
-    # Network info: fallback to empty dict if not present.
+    # Try to get the container IP from NetworkSettings (if available)
     net = container_data.get("NetworkSettings", {})
-    # Use the container's IP if available.
     container_ip = net.get("IPAddress", "")
-    
-    # Attempt to extract the host mapping for port 22/tcp.
+    # Default SSH port if no mapping is found
     ssh_port = None
     ports = net.get("Ports", {})
-    # Ports is expected to be a dict like: "22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "2222"}]
+    # Look for a mapping for port 22/tcp (common for SSH)
     for port_proto, mappings in ports.items():
         if port_proto.startswith("22") and mappings:
             ssh_port = mappings[0].get("HostPort")
@@ -51,14 +49,20 @@ def generate_inventory():
     # Ensure directories exist
     os.makedirs("host_vars", exist_ok=True)
     os.makedirs("group_vars", exist_ok=True)
-    
-    # Discover running containers
-    container_ids = get_container_ids()
-    
-    # Build inventory dictionary for --list output.
+
+    # Define an empty inventory with _meta for hostvars
     inventory = {"_meta": {"hostvars": {}}}
-    inventory["podman"] = {"hosts": []}
-    
+    # Prepare separate groups for each environment
+    for env in environments:
+        inventory[env] = {"hosts": []}
+
+    # Discover containers
+    container_ids = get_container_ids()
+    if not container_ids:
+        print("No running containers found.")
+        return
+
+    # Process each container
     for cid in container_ids:
         data = inspect_container(cid)
         if not data:
@@ -66,45 +70,78 @@ def generate_inventory():
         name, ip, port = extract_container_info(data)
         if not name:
             name = cid[:12]
-        # Use the container IP if available; otherwise, assume localhost.
+        # Randomly assign an environment to this container
+        assigned_env = random.choice(environments)
+        # Use container's IP if available; else, fallback to localhost
         ansible_host = ip if ip else "localhost"
         host_vars = {
             "ansible_host": ansible_host,
             "ansible_port": int(port) if port else 22,
             "container_id": cid,
-            "container_name": name
+            "container_name": name,
+            "env_assigned": assigned_env  # Assigned environment
         }
-        # Write host-specific variable file.
+        # Write host-specific variable file
         host_file = os.path.join("host_vars", f"{name}.yml")
         with open(host_file, "w") as f:
             yaml.dump(host_vars, f, default_flow_style=False)
         print(f"Created host_vars file: {host_file}")
-        
-        # Add this host to our inventory.
-        inventory["podman"]["hosts"].append(name)
+
+        # Add this host to its environment group in the inventory
+        inventory[assigned_env]["hosts"].append(name)
         inventory["_meta"]["hostvars"][name] = host_vars
 
-    # Define fixed filesystem values plus creative application environment variables.
-    group_vars = {
-        "filesystem_mount": "/mnt/podman",
-        "backup_path": "/backup/podman",
-        "log_path": "/var/log/podman",
-        "app_environment": "podman",
-        "debug_mode": False,
-        "api_endpoint": "https://api.podman.example.com",
-        "db_connection": "postgresql://podmanuser:podmanpass@dbserver/podmandb",
-        "feature_toggle": {"experimental_ui": True, "auto_scale": False},
-        "env_color": "purple"  # A creative color cue for Podman environments.
+    # Define creative group variables for each environment
+    group_vars_definitions = {
+        "dev": {
+            "filesystem_mount": "/mnt/dev",
+            "backup_path": "/backup/dev",
+            "log_path": "/var/log/dev",
+            "app_environment": "development",
+            "debug_mode": True,
+            "api_endpoint": "https://api-dev.example.com",
+            "db_connection": "postgresql://devuser:devpass@localhost/devdb",
+            "feature_toggle": {"new_ui": True, "beta_features": True},
+            "env_color": "blue",
+            "custom_message": "Welcome to the DEV playground!"
+        },
+        "staging": {
+            "filesystem_mount": "/mnt/staging",
+            "backup_path": "/backup/staging",
+            "log_path": "/var/log/staging",
+            "app_environment": "staging",
+            "debug_mode": True,
+            "api_endpoint": "https://api-staging.example.com",
+            "db_connection": "postgresql://staginguser:stagingpass@staginghost/stagingdb",
+            "feature_toggle": {"new_ui": False, "beta_features": True},
+            "env_color": "orange",
+            "custom_message": "Staging: Test before production!"
+        },
+        "production": {
+            "filesystem_mount": "/mnt/prod",
+            "backup_path": "/backup/prod",
+            "log_path": "/var/log/prod",
+            "app_environment": "production",
+            "debug_mode": False,
+            "api_endpoint": "https://api.example.com",
+            "db_connection": "postgresql://produser:prodpass@prodhost/proddb",
+            "feature_toggle": {"new_ui": False, "beta_features": False, "enable_monitoring": True},
+            "env_color": "green",
+            "custom_message": "Production: Stability is key."
+        }
     }
-    group_file = os.path.join("group_vars", "podman.yml")
-    with open(group_file, "w") as f:
-        yaml.dump(group_vars, f, default_flow_style=False)
-    print(f"Created group_vars file: {group_file}")
-    
-    # Optionally, write the complete inventory as JSON for ansible-inventory --list.
-    with open("inventory.json", "w") as f:
-        json.dump(inventory, f, indent=2)
-    print("Generated inventory.json")
+
+    # Generate group_vars files for each environment
+    for env, vars_dict in group_vars_definitions.items():
+        group_file = os.path.join("group_vars", f"{env}.yml")
+        with open(group_file, "w") as f:
+            yaml.dump(vars_dict, f, default_flow_style=False)
+        print(f"Created group_vars file: {group_file}")
+
+    # Write the complete inventory in YAML format.
+    with open("inventory.yml", "w") as f:
+        yaml.dump(inventory, f, default_flow_style=False)
+    print("Generated inventory.yml")
 
 if __name__ == "__main__":
     generate_inventory()
