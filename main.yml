@@ -1,0 +1,13 @@
+- name: Template application environment configuration
+  template:
+    src: app_env.conf.j2
+    dest: /etc/app_env.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Application
+
+- name: Display environment configuration
+  debug:
+    msg: "Environment {{ app_environment }} configured with API endpoint {{ api_endpoint }}"
+
