@@ -1,0 +1,8 @@
+- name: Read environment variables from /etc/environment
+  set_fact:
+    app_env: "{{ lookup('file', '/etc/environment') | regex_search('APP_ENV=(.*)', '\\1') }}"
+    custom_message: "{{ lookup('file', '/etc/environment') | regex_search('CUSTOM_MESSAGE=(.*)', '\\1') }}"
+
+- debug:
+    msg: "APP_ENV={{ app_env }}, CUSTOM_MESSAGE={{ custom_message }}"
+
